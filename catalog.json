@@ -6,7 +6,7 @@
       "title": "Home Assistant",
       "description": "Browse and control your Home Assistant entities on the device.",
       "author": "Daniel Wallner",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "base": "https://raw.githubusercontent.com/wdaniel1993/crosspoint-ha/main/home-assistant/",
       "files": ["manifest.json", "device.json", "plugin.js", "README.md"]
     }

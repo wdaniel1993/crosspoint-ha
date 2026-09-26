@@ -1,22 +1,39 @@
-# CrossPoint HA catalog — a Home Assistant script that serves the e-reader's
-# entity catalog over the REST API (?return_response).
+# CrossPoint HA catalog + actions — a Home Assistant script that serves the
+# e-reader's entity catalog AND executes row actions over the REST API
+# (?return_response). See github.com/wdaniel1993/crosspoint-ha.
+#
+# v0.4 — lists (scenes/scripts/rooms/AC) · two-hop actions · inline +/- step
+#        rows (light brightness, media volume; capability-driven, generic).
 #
 # Install:  Settings → Scripts → Create Script → Edit in YAML → replace all
-#           with this file's content. The service name will be
-#           `script.crosspoint_ha_catalog` (verify in Developer Tools → Actions).
+#           with this file's content (or append it to scripts.yaml and reload).
+#           The service name will be `script.crosspoint_ha_catalog` — keep the
+#           YAML key and the alias aligned so both agree.
 #
-# The device plugin (device.json) POSTs to:
-#   {ha_url}/api/services/script/crosspoint_ha_catalog?return_response
-# with {"page": N, "limit": M} and optionally {"query": "..."}.
+# The device plugin (device.json) makes two calls:
+#   browse:  POST {ha}/api/services/script/crosspoint_ha_catalog?return_response
+#            {"page": N, "limit": M}  [+ "query"/"kind"/"area"/"control"]
+#   action:  POST (same endpoint) {"act": "...", "base": "{ha}"}
+#            with act = "domain.entity", or "cmd:<op>:<param>:<entity>" for
+#            command rows (AC controls, step rows). Performs the action and returns
+#            {"ack": "<base>/auth/providers"}; the firmware's download step is
+#            GET-only, so afterwards the reader GETs that public URL as its
+#            acknowledgement file.
+#
+# Menu lists (device.json "lists"): kind=scene / kind=script for folders,
+# area="<name>" per room, control=climate for the AC control page.
 #
 # Customize:
-#   - `domains`  : which entity kinds appear in the catalog.
-#   - `exclude`  : entity_ids to hide (self-references etc.).
+#   - `domains` : which entity kinds appear in the catalog.
+#   - `exclude` : entity_ids to hide (self-references etc.).
 # Tap behavior on the device:
 #   - scene  → scene.turn_on          (activate)
 #   - script → script.turn_on         (run)
 #   - most   → homeassistant.toggle   (lights, switches, fans, covers, climate, media)
 #   - sensors → homeassistant.update_entity (refresh; read-only value shown on the row)
+#   - cmd:ac_* → AC control rows (on/off, mode, target temp ±, fan speed)
+#   - cmd:step:up|down → inline +/- step rows: light brightness ±25/255 (~10%),
+#                        media_player volume ± volume_step (default 0.05)
 #
 crosspoint_ha_catalog:
   alias: CrossPoint HA catalog
@@ -24,15 +41,153 @@ crosspoint_ha_catalog:
   max: 10
   fields:
     page:
-      description: "1-based page number (sent by the device)"
+      description: "1-based page number (catalog browsing)"
       default: 1
     limit:
-      description: "max items to return = page_size + 1 (sent by the device)"
+      description: "max items to return = page_size + 1"
       default: 13
     query:
-      description: "search text (sent by the device)"
+      description: "search text (catalog browsing)"
+      default: ""
+    kind:
+      description: "filter to one domain, e.g. scene / script (menu lists)"
+      default: ""
+    area:
+      description: "filter to one area name (menu lists)"
+      default: ""
+    control:
+      description: "control page, e.g. climate (menu lists)"
+      default: ""
+    act:
+      description: "entity_id or cmd:... to execute immediately (row tap)"
+      default: ""
+    base:
+      description: "HA base URL for the acknowledgement hop"
       default: ""
   sequence:
+    - variables:
+        act_entity: "{{ act | default('', true) | trim }}"
+        base_url: "{{ base | default('', true) | trim | regex_replace('/+$', '') }}"
+    - choose:
+        - conditions: "{{ act_entity != '' }}"
+          sequence:
+            - variables:
+                act_domain: "{{ act_entity.split('.')[0] }}"
+                act_result: "{{ {'ack': base_url ~ '/auth/providers'} }}"
+            - choose:
+                - conditions: "{{ act_entity[:4] == 'cmd:' }}"
+                  sequence:
+                    - variables:
+                        c_op: "{{ act_entity.split(':')[1] | default('') }}"
+                        c_param: "{{ act_entity.split(':')[2] | default('') }}"
+                        c_eid: >
+                          {%- set given = act_entity.split(':')[3] | default('') -%}
+                          {%- set clist = states.climate | selectattr('state', 'ne', 'unavailable') | list -%}
+                          {{ given if given else (clist[0].entity_id if clist else '') }}
+                    - choose:
+                        - conditions: "{{ c_op == 'ac_on' and c_eid != '' }}"
+                          sequence:
+                            - action: climate.turn_on
+                              continue_on_error: true
+                              target:
+                                entity_id: "{{ c_eid }}"
+                        - conditions: "{{ c_op == 'ac_off' and c_eid != '' }}"
+                          sequence:
+                            - action: climate.set_hvac_mode
+                              continue_on_error: true
+                              target:
+                                entity_id: "{{ c_eid }}"
+                              data:
+                                hvac_mode: "off"
+                        - conditions: "{{ c_op == 'ac_mode' and c_eid != '' }}"
+                          sequence:
+                            - action: climate.set_hvac_mode
+                              continue_on_error: true
+                              target:
+                                entity_id: "{{ c_eid }}"
+                              data:
+                                hvac_mode: "{{ c_param }}"
+                        - conditions: "{{ c_op == 'ac_fan' and c_eid != '' }}"
+                          sequence:
+                            - action: climate.set_fan_mode
+                              continue_on_error: true
+                              target:
+                                entity_id: "{{ c_eid }}"
+                              data:
+                                fan_mode: "{{ c_param }}"
+                        - conditions: "{{ c_op == 'ac_temp' and c_eid != '' }}"
+                          sequence:
+                            - variables:
+                                c_tgt: >
+                                  {%- set cur = state_attr(c_eid, 'temperature') | float(20) -%}
+                                  {%- set lo = state_attr(c_eid, 'min_temp') | float(16) -%}
+                                  {%- set hi = state_attr(c_eid, 'max_temp') | float(30) -%}
+                                  {%- set stp = state_attr(c_eid, 'target_temp_step') | float(0.5) -%}
+                                  {%- set dlt = stp if c_param == 'up' else -stp -%}
+                                  {{ [[cur + dlt, lo] | max, hi] | min }}
+                            - action: climate.set_temperature
+                              continue_on_error: true
+                              target:
+                                entity_id: "{{ c_eid }}"
+                              data:
+                                temperature: "{{ c_tgt }}"
+                        - conditions: "{{ c_op == 'step' and c_eid.split('.')[0] == 'light' and c_eid != '' }}"
+                          sequence:
+                            - variables:
+                                l_cur: "{{ state_attr(c_eid, 'brightness') | float(0) }}"
+                                l_up: >
+                                  {%- set b = state_attr(c_eid, 'brightness') | float(0) -%}
+                                  {{ [[b + 25, 25] | max, 255] | min }}
+                            - choose:
+                                - conditions: "{{ c_param == 'down' and (state_attr(c_eid, 'brightness') | float(0)) < 38 }}"
+                                  sequence:
+                                    - action: light.turn_off
+                                      continue_on_error: true
+                                      target:
+                                        entity_id: "{{ c_eid }}"
+                              default:
+                                - action: light.turn_on
+                                  continue_on_error: true
+                                  target:
+                                    entity_id: "{{ c_eid }}"
+                                  data:
+                                    brightness: "{{ l_up if c_param == 'up' else (l_cur - 25) }}"
+                        - conditions: "{{ c_op == 'step' and c_eid.split('.')[0] == 'media_player' and c_eid != '' }}"
+                          sequence:
+                            - variables:
+                                v_new: >
+                                  {%- set v = state_attr(c_eid, 'volume_level') | float(0.33) -%}
+                                  {%- set st = state_attr(c_eid, 'volume_step') | float(0.05) -%}
+                                  {%- set d = st if c_param == 'up' else -st -%}
+                                  {{ [[v + d, 0] | max, 1] | min }}
+                            - action: media_player.volume_set
+                              continue_on_error: true
+                              target:
+                                entity_id: "{{ c_eid }}"
+                              data:
+                                volume_level: "{{ v_new }}"
+                      default: []
+                - conditions: "{{ act_domain == 'scene' }}"
+                  sequence:
+                    - action: scene.turn_on
+                      target:
+                        entity_id: "{{ act_entity }}"
+                - conditions: "{{ act_domain == 'script' }}"
+                  sequence:
+                    - action: script.turn_on
+                      target:
+                        entity_id: "{{ act_entity }}"
+                - conditions: "{{ act_domain in ['sensor', 'binary_sensor', 'device_tracker'] }}"
+                  sequence:
+                    - action: homeassistant.update_entity
+                      target:
+                        entity_id: "{{ act_entity }}"
+              default:
+                - action: homeassistant.toggle
+                  target:
+                    entity_id: "{{ act_entity }}"
+            - stop: "action executed"
+              response_variable: act_result
     - variables:
         result: >
           {%- set domains = ['light','switch','fan','input_boolean','cover','climate','media_player','scene','script','sensor','binary_sensor'] -%}
@@ -42,12 +197,46 @@ crosspoint_ha_catalog:
           {%- set ps = lim - 1 -%}
           {%- set pg = page | int(1) -%}
           {%- set q = (query | default('')) | lower -%}
-          {%- set ns = namespace(items=[]) -%}
+          {%- set kind_f = (kind | default('')) | lower -%}
+          {%- set area_f = (area | default('')) | trim -%}
+          {%- set control_f = (control | default('')) | trim -%}
+          {%- set ns = namespace(items=[], n=0) -%}
+          {%- if control_f == 'climate' -%}
+          {%- set clist = states.climate | selectattr('state', 'ne', 'unavailable') | list -%}
+          {%- if clist | count > 0 -%}
+          {%- set c = clist[0] -%}
+          {%- set ce = c.entity_id -%}
+          {%- set tgt = c.attributes.temperature -%}
+          {%- set tgts = (tgt | string) if tgt is not none else '-' -%}
+          {%- set fan = c.attributes.fan_mode | default('-') -%}
+          {%- set stat = c.state ~ ' · ' ~ tgts ~ '° · ' ~ fan -%}
+          {%- set ns.n = ns.n + 1 -%}
+          {%- set ns.items = ns.items + [{'k': ('%05d' | format(ns.n)), 't': 'AC: on', 'a': stat, 'i': 'cmd:ac_on::' ~ ce, 'u': 'cmd'}] -%}
+          {%- set ns.n = ns.n + 1 -%}
+          {%- set ns.items = ns.items + [{'k': ('%05d' | format(ns.n)), 't': 'AC: off', 'a': stat, 'i': 'cmd:ac_off::' ~ ce, 'u': 'cmd'}] -%}
+          {%- for m in c.attributes.hvac_modes -%}
+          {%- if m != 'off' -%}
+          {%- set ns.n = ns.n + 1 -%}
+          {%- set ns.items = ns.items + [{'k': ('%05d' | format(ns.n)), 't': 'Mode: ' ~ m, 'a': (('active · ' if c.state == m else '') ~ tgts ~ '° · ' ~ fan), 'i': 'cmd:ac_mode:' ~ m ~ ':' ~ ce, 'u': 'cmd'}] -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {%- set stp = c.attributes.target_temp_step | default(0.5) -%}
+          {%- set ns.n = ns.n + 1 -%}
+          {%- set ns.items = ns.items + [{'k': ('%05d' | format(ns.n)), 't': 'Temp - ' ~ (stp | string) ~ '°', 'a': stat, 'i': 'cmd:ac_temp:down:' ~ ce, 'u': 'cmd'}] -%}
+          {%- set ns.n = ns.n + 1 -%}
+          {%- set ns.items = ns.items + [{'k': ('%05d' | format(ns.n)), 't': 'Temp + ' ~ (stp | string) ~ '°', 'a': stat, 'i': 'cmd:ac_temp:up:' ~ ce, 'u': 'cmd'}] -%}
+          {%- for f in c.attributes.fan_modes -%}
+          {%- set ns.n = ns.n + 1 -%}
+          {%- set ns.items = ns.items + [{'k': ('%05d' | format(ns.n)), 't': 'Fan: ' ~ f, 'a': (('active · ' if c.attributes.fan_mode == f else '') ~ stat), 'i': 'cmd:ac_fan:' ~ f ~ ':' ~ ce, 'u': 'cmd'}] -%}
+          {%- endfor -%}
+          {%- endif -%}
+          {%- else -%}
           {%- for e in states -%}
           {%- set dom = e.entity_id.split('.')[0] -%}
           {%- if dom in domains and e.entity_id not in exclude -%}
-          {%- if q == '' or q in (e.name | lower) -%}
           {%- set area = area_name(e.entity_id) or '' -%}
+          {%- if (kind_f == '' or dom == kind_f) and (area_f == '' or area == area_f) -%}
+          {%- if q == '' or q in (e.name | lower) -%}
           {%- set sortarea = area if area else '~' -%}
           {%- set unit = e.attributes.unit_of_measurement | default('') -%}
           {%- if dom == 'scene' -%}{%- set u = '/api/services/scene/turn_on' -%}
@@ -57,9 +246,38 @@ crosspoint_ha_catalog:
           {%- endif -%}
           {%- set line = (e.state ~ ' ' ~ unit) | trim -%}
           {%- set ns.items = ns.items + [{'k': ((sortarea ~ ' ' ~ e.name) | lower), 't': e.name, 'a': ((area ~ ' · ' ~ line) if area else line), 'i': e.entity_id, 'u': u}] -%}
+          {%- if q == '' -%}
+          {%- set a_pre = (area ~ ' · ') if area else '' -%}
+          {%- set bk = ((sortarea ~ ' ' ~ e.name) | lower) -%}
+          {%- if dom == 'light' and e.state != 'unavailable' and 'onoff' not in (e.attributes.supported_color_modes | default(['color_temp'])) -%}
+          {%- set b_raw = e.attributes.brightness -%}
+          {%- if b_raw is none -%}
+          {%- set st_up = a_pre ~ 'brightness off -> 9%' -%}
+          {%- set st_dn = a_pre ~ 'brightness: off' -%}
+          {%- else -%}
+          {%- set b_i = ((b_raw * 100 / 255) | int) -%}
+          {%- set b_up = [[b_raw + 25, 25] | max, 255] | min -%}
+          {%- set st_up = a_pre ~ 'brightness ' ~ b_i ~ '% -> ' ~ ((b_up * 100 / 255) | int) ~ '%' -%}
+          {%- set st_dn = (a_pre ~ 'brightness ' ~ b_i ~ '% -> off') if (b_raw - 25) < 13 else (a_pre ~ 'brightness ' ~ b_i ~ '% -> ' ~ (((b_raw - 25) * 100 / 255) | int) ~ '%') -%}
+          {%- endif -%}
+          {%- set ns.items = ns.items + [{'k': bk ~ ' 1', 't': e.name ~ ' +', 'a': st_up, 'i': 'cmd:step:up:' ~ e.entity_id, 'u': 'cmd'}] -%}
+          {%- set ns.items = ns.items + [{'k': bk ~ ' 2', 't': e.name ~ ' -', 'a': st_dn, 'i': 'cmd:step:down:' ~ e.entity_id, 'u': 'cmd'}] -%}
+          {%- endif -%}
+          {%- if dom == 'media_player' and (e.attributes.volume_level | default(none)) is not none and e.state != 'unavailable' -%}
+          {%- set v = e.attributes.volume_level -%}
+          {%- set vs = (e.attributes.volume_step | default(0.05)) | float(0.05) -%}
+          {%- set v_i = ((v * 100) | round(0) | int) -%}
+          {%- set v_up = [[v + vs, 0] | max, 1] | min -%}
+          {%- set v_dn = [[v - vs, 0] | max, 1] | min -%}
+          {%- set ns.items = ns.items + [{'k': bk ~ ' 1', 't': e.name ~ ' +', 'a': a_pre ~ 'volume ' ~ v_i ~ '% -> ' ~ ((v_up * 100) | round(0) | int) ~ '%', 'i': 'cmd:step:up:' ~ e.entity_id, 'u': 'cmd'}] -%}
+          {%- set ns.items = ns.items + [{'k': bk ~ ' 2', 't': e.name ~ ' -', 'a': a_pre ~ 'volume ' ~ v_i ~ '% -> ' ~ ((v_dn * 100) | round(0) | int) ~ '%', 'i': 'cmd:step:down:' ~ e.entity_id, 'u': 'cmd'}] -%}
+          {%- endif -%}
+          {%- endif -%}
+          {%- endif -%}
           {%- endif -%}
           {%- endif -%}
           {%- endfor -%}
+          {%- endif -%}
           {%- set srt = ns.items | sort(attribute='k') -%}
           {{ {'items': srt[(pg - 1) * ps : (pg - 1) * ps + lim]} | tojson }}
     - stop: "catalog page served"

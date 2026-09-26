@@ -24,18 +24,24 @@
       "url": "u"
     },
     "page_size": 12,
+    "lists": [
+      { "title": "Scenes", "body": "{\"page\": {page}, \"limit\": {limit}, \"kind\": \"scene\"}" },
+      { "title": "Scripts", "body": "{\"page\": {page}, \"limit\": {limit}, \"kind\": \"script\"}" },
+      { "title": "All entities" }
+    ],
     "search": {
       "body": "{\"page\": {page}, \"limit\": {limit}, \"query\": \"{query_raw}\"}"
     }
   },
   "download": {
-    "url": "{cfg.url}{url}",
+    "url": "{cfg.url}/api/services/script/crosspoint_ha_catalog?return_response",
     "method": "POST",
     "headers": {
       "Content-Type": "application/json",
       "Authorization": "Bearer {token}"
     },
-    "body": "{\"entity_id\": \"{id}\"}",
+    "body": "{\"act\": \"{id}\", \"base\": \"{cfg.url}\"}",
+    "url_path": "service_response.ack",
     "dest_dir": "/ha",
     "filename": "ack.json"
   }
