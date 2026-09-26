@@ -1,0 +1,42 @@
+{
+  "title": "Home Assistant",
+  "token": {
+    "file": "/.crosspoint/homeassistant.json",
+    "path": "token"
+  },
+  "config": {
+    "file": "/.crosspoint/homeassistant.json"
+  },
+  "browse": {
+    "format": "json",
+    "url": "{cfg.url}/api/services/script/crosspoint_ha_catalog?return_response",
+    "method": "POST",
+    "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer {token}"
+    },
+    "body": "{\"page\": {page}, \"limit\": {limit}}",
+    "items": "service_response.items",
+    "fields": {
+      "title": "t",
+      "author": "a",
+      "id": "i",
+      "url": "u"
+    },
+    "page_size": 12,
+    "search": {
+      "body": "{\"page\": {page}, \"limit\": {limit}, \"query\": \"{query_raw}\"}"
+    }
+  },
+  "download": {
+    "url": "{cfg.url}{url}",
+    "method": "POST",
+    "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer {token}"
+    },
+    "body": "{\"entity_id\": \"{id}\"}",
+    "dest_dir": "/ha",
+    "filename": "ack.json"
+  }
+}

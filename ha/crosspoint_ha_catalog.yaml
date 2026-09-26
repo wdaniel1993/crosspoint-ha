@@ -1,0 +1,66 @@
+# CrossPoint HA catalog — a Home Assistant script that serves the e-reader's
+# entity catalog over the REST API (?return_response).
+#
+# Install:  Settings → Scripts → Create Script → Edit in YAML → replace all
+#           with this file's content. The service name will be
+#           `script.crosspoint_ha_catalog` (verify in Developer Tools → Actions).
+#
+# The device plugin (device.json) POSTs to:
+#   {ha_url}/api/services/script/crosspoint_ha_catalog?return_response
+# with {"page": N, "limit": M} and optionally {"query": "..."}.
+#
+# Customize:
+#   - `domains`  : which entity kinds appear in the catalog.
+#   - `exclude`  : entity_ids to hide (self-references etc.).
+# Tap behavior on the device:
+#   - scene  → scene.turn_on          (activate)
+#   - script → script.turn_on         (run)
+#   - most   → homeassistant.toggle   (lights, switches, fans, covers, climate, media)
+#   - sensors → homeassistant.update_entity (refresh; read-only value shown on the row)
+#
+crosspoint_ha_catalog:
+  alias: CrossPoint HA catalog
+  mode: parallel
+  max: 10
+  fields:
+    page:
+      description: "1-based page number (sent by the device)"
+      default: 1
+    limit:
+      description: "max items to return = page_size + 1 (sent by the device)"
+      default: 13
+    query:
+      description: "search text (sent by the device)"
+      default: ""
+  sequence:
+    - variables:
+        result: >
+          {%- set domains = ['light','switch','fan','input_boolean','cover','climate','media_player','scene','script','sensor','binary_sensor'] -%}
+          {%- set togglable = ['light','switch','fan','input_boolean','cover','climate','media_player'] -%}
+          {%- set exclude = ['script.crosspoint_ha_catalog'] -%}
+          {%- set lim = limit | int(13) -%}
+          {%- set ps = lim - 1 -%}
+          {%- set pg = page | int(1) -%}
+          {%- set q = (query | default('')) | lower -%}
+          {%- set ns = namespace(items=[]) -%}
+          {%- for e in states -%}
+          {%- set dom = e.entity_id.split('.')[0] -%}
+          {%- if dom in domains and e.entity_id not in exclude -%}
+          {%- if q == '' or q in (e.name | lower) -%}
+          {%- set area = area_name(e.entity_id) or '' -%}
+          {%- set sortarea = area if area else '~' -%}
+          {%- set unit = e.attributes.unit_of_measurement | default('') -%}
+          {%- if dom == 'scene' -%}{%- set u = '/api/services/scene/turn_on' -%}
+          {%- elif dom == 'script' -%}{%- set u = '/api/services/script/turn_on' -%}
+          {%- elif dom in togglable -%}{%- set u = '/api/services/homeassistant/toggle' -%}
+          {%- else -%}{%- set u = '/api/services/homeassistant/update_entity' -%}
+          {%- endif -%}
+          {%- set line = (e.state ~ ' ' ~ unit) | trim -%}
+          {%- set ns.items = ns.items + [{'k': ((sortarea ~ ' ' ~ e.name) | lower), 't': e.name, 'a': ((area ~ ' · ' ~ line) if area else line), 'i': e.entity_id, 'u': u}] -%}
+          {%- endif -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {%- set srt = ns.items | sort(attribute='k') -%}
+          {{ {'items': srt[(pg - 1) * ps : (pg - 1) * ps + lim]} | tojson }}
+    - stop: "catalog page served"
+      response_variable: result
